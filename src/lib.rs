@@ -340,6 +340,7 @@ pub use self::{
         response::Response,
         upgrade::Upgraded,
     },
+    conn::Conn,
     error::{Error, Result},
     ext::{ResponseBuilderExt, ResponseExt},
     group::Group,

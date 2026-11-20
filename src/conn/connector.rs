@@ -277,11 +277,13 @@ impl TransportConnector {
                 stream: self.config.verbose.wrap(stream),
                 tls_info: false,
                 proxy: None,
+                extra: None,
             },
             MaybeHttpsStream::Https(stream) => Conn {
                 stream: self.config.verbose.wrap(TlsConn { stream }),
                 tls_info: self.config.tls_info,
                 proxy: None,
+                extra: None,
             },
         };
 
@@ -304,6 +306,7 @@ impl TransportConnector {
             stream: conn,
             tls_info: self.config.tls_info,
             proxy: proxy.into(),
+            extra: None,
         })
     }
 
