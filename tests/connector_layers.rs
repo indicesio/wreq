@@ -1,12 +1,22 @@
 mod support;
 
-use std::time::Duration;
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use futures_util::future::join_all;
 use pretty_env_logger::env_logger;
 use support::{layer::DelayLayer, server};
-use tower::{layer::util::Identity, limit::ConcurrencyLimitLayer, timeout::TimeoutLayer};
-use wreq::Client;
+use tower::{
+    layer::util::Identity, limit::ConcurrencyLimitLayer, timeout::TimeoutLayer,
+    util::MapResponseLayer,
+};
+use wreq::{Client, ClientBuilder, Conn};
 
 #[tokio::test]
 async fn non_op_layer() {
@@ -228,4 +238,59 @@ async fn no_generic_bounds_required_for_client_new() {
     let res = wreq::get(url).send().await;
 
     assert!(res.is_ok());
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Id(usize);
+
+fn add_conn_id_layer(builder: ClientBuilder) -> ClientBuilder {
+    let connections = Arc::new(AtomicUsize::new(0));
+    builder.connector_layer(MapResponseLayer::new(move |conn: Conn| {
+        conn.extra(Id(connections.fetch_add(1, Ordering::Relaxed)))
+    }))
+}
+
+async fn make_request_and_get_id(client: &Client, url: String) -> (SocketAddr, Id) {
+    let res = client.get(url).send().await.unwrap();
+    let id = res.extensions().get::<Id>().cloned().unwrap();
+    let local_addr = res.local_addr().unwrap();
+    (local_addr, id)
+}
+
+#[tokio::test]
+async fn same_conn_same_extra() {
+    let _ = env_logger::try_init();
+
+    let server = server::http(move |_req| async { http::Response::default() });
+    let url = format!("http://{}", server.addr());
+
+    let client = add_conn_id_layer(Client::builder())
+        .no_proxy()
+        .build()
+        .unwrap();
+
+    let (addr1, id1) = make_request_and_get_id(&client, url.clone()).await;
+    let (addr2, id2) = make_request_and_get_id(&client, url).await;
+    assert_eq!(addr1, addr2, "Connection not reused");
+    assert_eq!(id1, id2, "Connection reused but ids are different");
+}
+
+#[tokio::test]
+async fn diff_conn_diff_extra() {
+    let _ = env_logger::try_init();
+
+    let server1 = server::http(move |_req| async { http::Response::default() });
+    let url1 = format!("http://{}", server1.addr());
+    let server2 = server::http(move |_req| async { http::Response::default() });
+    let url2 = format!("http://{}", server2.addr());
+
+    let client = add_conn_id_layer(Client::builder())
+        .no_proxy()
+        .build()
+        .unwrap();
+
+    let (addr1, id1) = make_request_and_get_id(&client, url1).await;
+    let (addr2, id2) = make_request_and_get_id(&client, url2).await;
+    assert_ne!(addr1, addr2, "Connection reused");
+    assert_ne!(id1, id2, "Connection not reused but ids are same");
 }

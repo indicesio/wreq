@@ -81,6 +81,7 @@ pin_project! {
     pub struct Conn {
         tls_info: bool,
         proxy: Option<Intercept>,
+        extra: Option<Extra>,
         #[pin]
         stream: Box<dyn AsyncConnWithInfo>,
     }
@@ -136,6 +137,11 @@ struct ExtraEnvelope<T>(T);
 #[derive(Debug)]
 struct ExtraChain<T>(Box<dyn ExtraInner>, T);
 
+/// Chains two type-erased `ExtraInner` implementations together, inserting both into
+/// the extensions.
+#[derive(Debug)]
+struct ExtraPair(Box<dyn ExtraInner>, Box<dyn ExtraInner>);
+
 /// Information about an HTTP proxy identity.
 #[derive(Debug, Default, Clone)]
 struct ProxyIdentity {
@@ -158,9 +164,47 @@ pub struct Connected {
 
 // ==== impl Conn ====
 
+impl Conn {
+    /// Set extra connection information to be set in the extensions of every `Response`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::time::Instant;
+    ///
+    /// use tower::util::MapResponseLayer;
+    ///
+    /// #[derive(Clone, Debug)]
+    /// struct Opened(Instant);
+    ///
+    /// let client = wreq::Client::builder()
+    ///     .connector_layer(MapResponseLayer::new(|conn: wreq::Conn| {
+    ///         conn.extra(Opened(Instant::now()))
+    ///     }))
+    ///     .build()
+    ///     .unwrap();
+    /// // Then `response.extensions().get::<Opened>()` tells when the client opened the used
+    /// // connection.
+    /// ```
+    pub fn extra<T: Clone + Send + Sync + Debug + 'static>(mut self, extra: T) -> Conn {
+        self.extra = Some(Extra(match self.extra {
+            Some(prev) => Box::new(ExtraChain(prev.0, extra)),
+            None => Box::new(ExtraEnvelope(extra)),
+        }));
+        self
+    }
+}
+
 impl Connection for Conn {
     fn connected(&self) -> Connected {
         let mut connected = self.stream.connected();
+
+        if let Some(extra) = &self.extra {
+            connected.extra = Some(match connected.extra {
+                Some(prev) => Extra(Box::new(ExtraPair(prev.0, extra.0.clone_box()))),
+                None => extra.clone(),
+            });
+        }
 
         if let Some(proxy) = &self.proxy {
             connected = connected.proxy(proxy.clone());
@@ -468,5 +512,18 @@ where
     fn set(&self, res: &mut Extensions) {
         self.0.set(res);
         res.insert(self.1.clone());
+    }
+}
+
+// ===== impl ExtraPair =====
+
+impl ExtraInner for ExtraPair {
+    fn clone_box(&self) -> Box<dyn ExtraInner> {
+        Box::new(ExtraPair(self.0.clone_box(), self.1.clone_box()))
+    }
+
+    fn set(&self, res: &mut Extensions) {
+        self.0.set(res);
+        self.1.set(res);
     }
 }
